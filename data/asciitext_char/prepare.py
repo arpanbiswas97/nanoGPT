@@ -8,18 +8,18 @@ encoder and decoder and some other related info.
 import os
 import pickle
 
-# import requests
 import numpy as np
 import pyfiglet
+import requests
 
 # download the ascii text dataset
 input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
-# if not os.path.exists(input_file_path):
-#     data_url = ''
-#     with open(input_file_path, 'w') as f:
-#         f.write(requests.get(data_url).text)
+if not os.path.exists(input_file_path):
+    data_url = "https://www.gutenberg.org/cache/epub/7256/pg7256.txt"
+    with open(input_file_path, "w", encoding="utf-8", errors="ignore") as f:
+        f.write(requests.get(data_url).text)
 
-with open(input_file_path, "r", encoding="utf-8") as f:
+with open(input_file_path, "r", encoding="utf-8", errors="ignore") as f:
     data = f.read()
 
 # Convert the text to ascii banners
