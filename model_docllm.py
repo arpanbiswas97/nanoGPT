@@ -233,13 +233,11 @@ class DocLLM(nn.Module):
         return optimizer
 
     @torch.no_grad()
-    def generate(self, idx, bbox, bbox_to_fill, temperature=1.0, top_k=None):
+    def generate(self, idx, bbox, max_new_tokens, B_MASK, temperature=1.0, top_k=None):
         """
         idx (b, t)
-        bbox_to_fill (b, t)
         """
-        tokens_to_generate = bbox_to_fill.size(1)
-        for i in range(tokens_to_generate):
+        for i in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it from the end
             idx_cond = (
                 idx
@@ -264,7 +262,7 @@ class DocLLM(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
 
             # Bounding box that just got filled
-            bbox_next = bbox_to_fill[:, i]
+            bbox_next = B_MASK
             idx = torch.cat((idx, idx_next), dim=1)
             bbox = torch.cat((bbox, bbox_next), dim=1)
 
