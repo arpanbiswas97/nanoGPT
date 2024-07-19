@@ -1,15 +1,15 @@
-import os
-import time
 import math
+import os
 import pickle
+import time
 from contextlib import nullcontext
 
 import numpy as np
 import torch
+from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 
-from model_docllm import DocLLMConfig, DocLLM
+from model_docllm import DocLLM, DocLLMConfig
 
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O

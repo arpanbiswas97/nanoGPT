@@ -1,40 +1,58 @@
 import math
+
+import inspect
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 from pydantic import BaseModel
+from torch.nn import functional as F
 
 
 class DocLLMConfig(BaseModel):
     vocab_size: int
-    block_size: int
+    block_size: int = 1024
+    n_layer: int = 12
+    n_embd: int = 768
+    n_head: int = 12
+    bias: bool = True
+    dropout: float = 0.0
     spatial_precision: int
-    n_layer: int
-    n_embd: int
-    n_head: int
-    bias: float
-    dropout: float
 
 
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
-    def __init__(self, ndim: int, bias: bool):
+    def __init__(self, n_embd: int, bias: bool):
+        """
+        Paremeters
+        ----------
+        n_embd: int
+            Number of features in the input tensor
+        bias: bool
+            If True, adds a learnable bias to the output tensor
+        """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.weight = nn.Parameter(torch.ones(n_embd))
+        self.bias = nn.Parameter(torch.zeros(n_embd)) if bias else None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """(B, ..., ndim) -> (B, ..., ndim)"""
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
 class DisentangledSpatialAttention(nn.Module):
 
     def __init__(self, config: DocLLMConfig):
+        """
+        Parameters
+        ----------
+        config: DocLLMConfig
+            All parameters of the model
+        """
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads
+        # key, query, value projections for all heads of token embeddings
         self.t_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # key, query projections for all heads of spatial embeddings
         self.s_attn = nn.Linear(config.n_embd, 2 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -51,13 +69,23 @@ class DisentangledSpatialAttention(nn.Module):
         self.dropout = config.dropout
 
     def forward(self, xt: torch.Tensor, xs: torch.Tensor) -> torch.Tensor:
+        """(B, seq_len, n_embd), (B, seq_len, n_embd) -> (B, seq_len, n_embd)"""
         B, seq_len, n_embd = xt.size()
 
         # calculate query, key, values for all heads
+        qt: torch.Tensor
+        kt: torch.Tensor
+        vt: torch.Tensor
+        qs: torch.Tensor
+        ks: torch.Tensor
+
+        # (B, seq_len, 3 * n_embd) -> (B, seq_len, n_embd) x 3
         qt, kt, vt = self.t_attn(xt).split(self.n_embd, dim=2)
+        # (B, seq_len, 2 * n_embd) -> (B, seq_len, n_embd) x 2
         qs, ks = self.s_attn(xs).split(self.n_embd, dim=2)
 
-        # (B, seq_len, n_embd) -> (B, nh, seq_len, hs)
+        # h_embd = n_embd // n_head
+        # (B, seq_len, n_embd) -> (B, n_head, seq_len, h_embd)
         kt = kt.view(B, seq_len, self.n_head, n_embd // self.n_head).transpose(1, 2)
         qt = qt.view(B, seq_len, self.n_head, n_embd // self.n_head).transpose(1, 2)
         vt = vt.view(B, seq_len, self.n_head, n_embd // self.n_head).transpose(1, 2)
@@ -66,6 +94,8 @@ class DisentangledSpatialAttention(nn.Module):
         qs = qs.view(B, seq_len, self.n_head, n_embd // self.n_head).transpose(1, 2)
 
         # attention
+        att: torch.Tensor
+        y: torch.Tensor
         att = (
             (qt @ kt.transpose(-2, -1))
             + self.lambda_ts * (qt @ ks.transpose(-2, -1))
@@ -76,7 +106,7 @@ class DisentangledSpatialAttention(nn.Module):
         att = self.attn_dropout(att)
         y = att @ vt
 
-        # (B, nh, seq_len, hs) -> (B, seq_len, n_embd)
+        # (B, n_head, seq_len, h_embd) -> (B, seq_len, n_embd)
         y = y.transpose(1, 2).contiguous().view(B, seq_len, n_embd)
         y = self.resid_dropout(self.c_proj(y))
 
@@ -86,6 +116,12 @@ class DisentangledSpatialAttention(nn.Module):
 class MLP(nn.Module):
 
     def __init__(self, config: DocLLMConfig):
+        """
+        Parameters
+        ----------
+        config: DocLLMConfig
+            All parameters of the model
+        """
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu = nn.GELU()
@@ -93,7 +129,7 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, xt: torch.Tensor) -> torch.Tensor:
-
+        """(B, seq_len, n_embd) -> (B, seq_len, n_embd)"""
         xt = self.c_fc(xt)
         xt = self.gelu(xt)
         xt = self.c_proj(xt)
@@ -104,6 +140,12 @@ class MLP(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, config: DocLLMConfig):
+        """
+        Parameters
+        ----------
+        config: DocLLMConfig
+            All parameters of the model
+        """
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = DisentangledSpatialAttention(config)
@@ -111,6 +153,7 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, xt: torch.Tensor, xs: torch.Tensor) -> torch.Tensor:
+        """(B, seq_len, n_embd), (B, seq_len, n_embd) -> (B, seq_len, n_embd)"""
         xt = xt + self.attn(self.ln_1(xt), xs)
         xt = xt + self.mlp(self.ln_2(xt))
         return xt
@@ -118,7 +161,13 @@ class Block(nn.Module):
 
 class DocLLM(nn.Module):
     def __init__(self, config: DocLLMConfig):
-        super().__init()
+        """
+        Parameters
+        ----------
+        config: DocLLMConfig
+            All parameters of the model
+        """
+        super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
@@ -148,16 +197,9 @@ class DocLLM(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
-    def get_num_params(self, non_embedding=True):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
+    def get_num_params(self):
+        """Return the number of parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -169,11 +211,12 @@ class DocLLM(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, bbox, targets=None):
-        device = idx.device
         b, t = idx.size()
         assert (
             t <= self.config.block_size
-        ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        ), "Cannot forward sequence of length {}, block size is only {}".format(
+            t, self.config.block_size
+        )
 
         xt = self.transformer.wte(idx)  # (b, t, n_embd)
         xs = self.transformer.spe(bbox)  # (b, t, n_embd)
@@ -237,7 +280,7 @@ class DocLLM(nn.Module):
         """
         idx (b, t)
         """
-        for i in range(max_new_tokens):
+        for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it from the end
             idx_cond = (
                 idx
