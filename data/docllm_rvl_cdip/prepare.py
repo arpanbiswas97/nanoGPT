@@ -55,7 +55,7 @@ if __name__ == "__main__":
         ids = []
         bboxes = []
         for word in example:
-            ids.append(enc.encode(word))
+            ids.append(enc.encode(word["text"]))
             bboxes.append(encode_bbox(word["bbox"]))
         out = {"ids": ids, "bboxes": bboxes}
         return out
